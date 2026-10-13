@@ -28,6 +28,14 @@ function namesTrackedGpu(...values) {
     || /(?:radeon\s*)?rx\s*9060(?:\s*xt)?\b/.test(text);
 }
 
+function gpuFamily(...values) {
+  const text = values.filter(Boolean).join(' ').toLowerCase();
+  if (/(?:rtx|geforce)\s*5070\b/.test(text)) return 'rtx-5070';
+  if (/(?:rtx|geforce)\s*5080\b/.test(text)) return 'rtx-5080';
+  if (/(?:radeon\s*)?rx\s*9060(?:\s*xt)?\b/.test(text)) return 'rx-9060';
+  return null;
+}
+
 function json(res, status, payload) {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify(payload));
@@ -173,7 +181,7 @@ function createAgent(job) {
   job.saveOpportunity = updateSite.save;
   return new Agent({
     name: 'New Zealand GPU price researcher',
-    instructions: `You track current New Zealand retail prices, deals, pre-orders, and stock availability for this person:\n${job.interests}\n\nThis agent ONLY finds GPU product prices. Never return or open classes, competitions, events, clubs, sport, gaming tournaments, search pages, category pages, news, or general advice. Only consider RTX 5070, RTX 5080, RX 9060, or RX 9060 XT product listings. Use web search first and cover the three requested model families where verified listings exist; one hosted search call may contain multiple focused queries. Search and page reads are restricted to PB Tech, Computer Lounge, ExtremePC, PP, and Mighty Ape. You have at most ${MAX_SEARCHES} searches and ${MAX_PAGE_READS} page reads. For every shortlisted listing, use open_page on the retailer's individual product page before accepting it. Verify all three: (1) the exact tracked GPU model and variant, (2) the current NZD retail price, and (3) that it is currently in stock, available to order, or explicitly a pre-order. Do not invent prices, availability, a retailer, or a deal. If a page fails, investigate another approved retailer. Return up to five useful listings; fewer is better than unsupported results.\n\nReturn JSON only with this shape: {"items":[{"name":"","type":"price|deal|preorder|restock","url":"","whyFit":"","priceExcerpt":"","availabilityExcerpt":"","retailerExcerpt":""}],"ruledOut":[{"name":"","reason":""}],"note":""}. Each excerpt must be a short direct retailer-source excerpt. An item without all three excerpts must be ruled out. Final validated items are saved by the job.`,
+    instructions: `You track current New Zealand retail prices, deals, pre-orders, and stock availability for this person:\n${job.interests}\n\nThis agent ONLY finds GPU product prices. Never return or open classes, competitions, events, clubs, sport, gaming tournaments, search pages, category pages, news, or general advice. Only consider RTX 5070, RTX 5080, RX 9060, or RX 9060 XT product listings. Use web search first and cover the three requested model families where verified listings exist; one hosted search call may contain multiple focused queries. Search and page reads are restricted to PB Tech, Computer Lounge, ExtremePC, PP, and Mighty Ape. You have at most ${MAX_SEARCHES} searches and ${MAX_PAGE_READS} page reads. For every shortlisted listing, use open_page on the retailer's individual product page before accepting it. Verify all three: (1) the exact tracked GPU model and variant, (2) the current NZD retail price, and (3) that it is currently in stock, available to order, or explicitly a pre-order. Do not invent prices, availability, a retailer, or a deal. If a page fails, investigate another approved retailer.\n\nKeep at most TWO listings for each family: RTX 5070, RTX 5080, and RX 9060/RX 9060 XT combined. Within each family, compare the verified NZD price and keep only the two cheapest listings; sort each family from cheapest to most expensive. Do not include another listing merely to fill space. Return up to six listings total, fewer when evidence is insufficient.\n\nReturn JSON only with this shape: {"items":[{"name":"","type":"price|deal|preorder|restock","url":"","whyFit":"","priceExcerpt":"","availabilityExcerpt":"","retailerExcerpt":""}],"ruledOut":[{"name":"","reason":""}],"note":""}. Each excerpt must be a short direct retailer-source excerpt. An item without all three excerpts must be ruled out. Final validated items are saved by the job.`,
     tools: [
       webSearchTool({ searchContextSize: 'medium', filters: { allowedDomains: RETAILER_DOMAINS } }),
       createOpenPage(job),
@@ -205,6 +213,7 @@ function validateResults(results) {
     throw new Error('The research agent returned an invalid result shape.');
   }
   const seen = new Set();
+  const perFamily = new Map();
   for (const item of results.items) {
     const required = ['name', 'url', 'priceExcerpt', 'availabilityExcerpt', 'retailerExcerpt'];
     if (required.some((key) => !String(item?.[key] || '').trim())) {
@@ -229,8 +238,13 @@ function validateResults(results) {
     if (!namesTrackedGpu(item.name, item.priceExcerpt, item.retailerExcerpt)) {
       throw new Error('An item was not an RTX 5070, RTX 5080, or RX 9060/9060 XT listing.');
     }
+    const family = gpuFamily(item.name, item.priceExcerpt, item.retailerExcerpt);
+    perFamily.set(family, (perFamily.get(family) || 0) + 1);
+    if (perFamily.get(family) > 2) {
+      throw new Error('More than two listings were returned for one GPU model family.');
+    }
   }
-  if (results.items.length > 5) throw new Error('More than five opportunities were returned.');
+  if (results.items.length > 6) throw new Error('More than six GPU listings were returned.');
 }
 
 async function runJob(job) {
