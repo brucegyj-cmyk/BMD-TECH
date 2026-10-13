@@ -10,6 +10,23 @@ const MAX_SEARCHES = 10;
 const MAX_PAGE_READS = 15;
 const MAX_RUNTIME_MS = 4 * 60 * 1000;
 const jobs = new Map();
+const RETAILER_DOMAINS = ['pbtech.co.nz', 'computerlounge.co.nz', 'extremepc.co.nz', 'pp.co.nz', 'mightyape.co.nz'];
+
+function isApprovedRetailerUrl(value) {
+  try {
+    const host = new URL(value).hostname.toLowerCase().replace(/^www\./, '');
+    return RETAILER_DOMAINS.some((domain) => host === domain || host.endsWith(`.${domain}`));
+  } catch {
+    return false;
+  }
+}
+
+function namesTrackedGpu(...values) {
+  const text = values.filter(Boolean).join(' ').toLowerCase();
+  return /(?:rtx|geforce)\s*5070\b/.test(text)
+    || /(?:rtx|geforce)\s*5080\b/.test(text)
+    || /(?:radeon\s*)?rx\s*9060(?:\s*xt)?\b/.test(text);
+}
 
 function json(res, status, payload) {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
@@ -46,18 +63,14 @@ function createOpenPage(job) {
   return tool({
     name: 'open_page',
     description:
-      'Read one publicly accessible source page. Use this after search results to verify official eligibility, location, and whether the opportunity is open.',
+      'Read one approved New Zealand PC retailer product page to verify a tracked GPU price and stock status.',
     parameters: z.object({ url: z.string() }),
     async execute({ url }) {
       if (job.pageReads >= MAX_PAGE_READS) {
         throw new Error(`Page-read limit of ${MAX_PAGE_READS} reached.`);
       }
       if (job.controller.signal.aborted) throw new Error('Job cancelled or timed out.');
-      try {
-        new URL(url);
-      } catch {
-        throw new Error('open_page requires an absolute HTTP(S) URL.');
-      }
+      if (!isApprovedRetailerUrl(url)) throw new Error('open_page only accepts approved New Zealand PC retailer domains.');
       job.pageReads += 1;
       job.toolCalls.push({ type: 'open_page', url, atMs: elapsed(job) });
       console.log(JSON.stringify({ jobId: job.id, tool: 'open_page', url }));
@@ -97,6 +110,8 @@ function createUpdateSite(job) {
     } catch {
       throw new Error('update_site requires an absolute HTTP(S) URL.');
     }
+    if (!isApprovedRetailerUrl(url)) throw new Error('update_site only accepts approved New Zealand PC retailer domains.');
+    if (!namesTrackedGpu(title, sourceExcerpt)) throw new Error('update_site only accepts RTX 5070, RTX 5080, or RX 9060/9060 XT listings.');
 
     const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY, {
       auth: { autoRefreshToken: false, persistSession: false },
@@ -141,7 +156,7 @@ function createUpdateSite(job) {
     save,
     tool: tool({
       name: 'update_site',
-      description: 'Save one fully verified opportunity to the site. Call exactly once for every item kept in the final results, and never for ruled-out or incompletely verified items. Existing URLs are skipped.',
+      description: 'Save one fully verified NZ GPU price listing to the site. Only save an RTX 5070, RTX 5080, or RX 9060/9060 XT listing from an approved retailer. Existing URLs are skipped.',
       parameters: z.object({
         title: z.string().min(1),
         url: z.string().min(1),
@@ -158,9 +173,9 @@ function createAgent(job) {
   job.saveOpportunity = updateSite.save;
   return new Agent({
     name: 'New Zealand GPU price researcher',
-    instructions: `You track current New Zealand retail prices, deals, pre-orders, and stock availability for this person:\n${job.interests}\n\nUse web search first. Run at least three distinct searches: one for RTX 5070, one for RTX 5080, and one for RX 9060/9060 XT, focused on New Zealand retailers and NZD. You have at most ${MAX_SEARCHES} searches and ${MAX_PAGE_READS} page reads. For every shortlisted listing, use open_page on the retailer's own product page before accepting it. Verify all three: (1) the exact GPU model and variant, (2) the current NZD retail price, and (3) that it is currently in stock, available to order, or explicitly a pre-order. Do not invent prices, availability, a retailer, or a deal. If a page fails, investigate another retailer. Return up to five useful listings; fewer is better than unsupported results.\n\nReturn JSON only with this shape: {"items":[{"name":"","type":"price|deal|preorder|restock","url":"","whyFit":"","priceExcerpt":"","availabilityExcerpt":"","retailerExcerpt":""}],"ruledOut":[{"name":"","reason":""}],"note":""}. Each excerpt must be a short direct retailer-source excerpt. An item without all three excerpts must be ruled out. Final validated items are saved by the job.`,
+    instructions: `You track current New Zealand retail prices, deals, pre-orders, and stock availability for this person:\n${job.interests}\n\nThis agent ONLY finds GPU product prices. Never return or open classes, competitions, events, clubs, sport, gaming tournaments, search pages, category pages, news, or general advice. Only consider RTX 5070, RTX 5080, RX 9060, or RX 9060 XT product listings. Use web search first. Run at least three distinct searches: one for RTX 5070, one for RTX 5080, and one for RX 9060/9060 XT, focused on New Zealand retailers and NZD. Search and page reads are restricted to PB Tech, Computer Lounge, ExtremePC, PP, and Mighty Ape. You have at most ${MAX_SEARCHES} searches and ${MAX_PAGE_READS} page reads. For every shortlisted listing, use open_page on the retailer's individual product page before accepting it. Verify all three: (1) the exact tracked GPU model and variant, (2) the current NZD retail price, and (3) that it is currently in stock, available to order, or explicitly a pre-order. Do not invent prices, availability, a retailer, or a deal. If a page fails, investigate another approved retailer. Return up to five useful listings; fewer is better than unsupported results.\n\nReturn JSON only with this shape: {"items":[{"name":"","type":"price|deal|preorder|restock","url":"","whyFit":"","priceExcerpt":"","availabilityExcerpt":"","retailerExcerpt":""}],"ruledOut":[{"name":"","reason":""}],"note":""}. Each excerpt must be a short direct retailer-source excerpt. An item without all three excerpts must be ruled out. Final validated items are saved by the job.`,
     tools: [
-      webSearchTool({ searchContextSize: 'medium' }),
+      webSearchTool({ searchContextSize: 'medium', filters: { allowedDomains: RETAILER_DOMAINS } }),
       createOpenPage(job),
     ],
   });
@@ -207,6 +222,12 @@ function validateResults(results) {
     seen.add(canonicalName);
     if (!/(nzd|\$\s*\d|\d\s*nz\s*dollars?)/i.test(String(item.priceExcerpt))) {
       throw new Error('An item lacked a NZD price excerpt.');
+    }
+    if (!isApprovedRetailerUrl(item.url)) {
+      throw new Error('An item was not from an approved New Zealand PC retailer.');
+    }
+    if (!namesTrackedGpu(item.name, item.priceExcerpt, item.retailerExcerpt)) {
+      throw new Error('An item was not an RTX 5070, RTX 5080, or RX 9060/9060 XT listing.');
     }
   }
   if (results.items.length > 5) throw new Error('More than five opportunities were returned.');
