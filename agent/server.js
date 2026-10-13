@@ -157,8 +157,8 @@ function createAgent(job) {
   const updateSite = createUpdateSite(job);
   job.saveOpportunity = updateSite.save;
   return new Agent({
-    name: 'Verified opportunity researcher',
-    instructions: `You find current opportunities for this person:\n${job.interests}\n\nUse web search first. You have at most ${MAX_SEARCHES} searches and ${MAX_PAGE_READS} page reads. For every shortlisted item, use open_page on an official organizer, event, or application source before accepting it. Verify all three: (1) a 25-year-old is eligible, (2) it is available in Auckland or explicitly online/open to New Zealand residents, and (3) applications, registration, or attendance are currently open. Do not assume education, school, work experience, citizenship, or travel ability. If a page fails, seek another source. Never invent results to fill a quota; return up to five and fewer when verification is incomplete.\n\nReturn JSON only with this shape: {"items":[{"name":"","type":"competition|program|event","url":"","whyFit":"","eligibilityExcerpt":"","availabilityExcerpt":"","locationExcerpt":""}],"ruledOut":[{"name":"","reason":""}],"note":""}. Each excerpt must be a short direct source excerpt. An item without all three excerpts must be ruled out. Final validated items are saved by the job.`,
+    name: 'New Zealand GPU price researcher',
+    instructions: `You track current New Zealand retail prices, deals, pre-orders, and stock availability for this person:\n${job.interests}\n\nUse web search first. Run at least three distinct searches: one for RTX 5070, one for RTX 5080, and one for RX 9060/9060 XT, focused on New Zealand retailers and NZD. You have at most ${MAX_SEARCHES} searches and ${MAX_PAGE_READS} page reads. For every shortlisted listing, use open_page on the retailer's own product page before accepting it. Verify all three: (1) the exact GPU model and variant, (2) the current NZD retail price, and (3) that it is currently in stock, available to order, or explicitly a pre-order. Do not invent prices, availability, a retailer, or a deal. If a page fails, investigate another retailer. Return up to five useful listings; fewer is better than unsupported results.\n\nReturn JSON only with this shape: {"items":[{"name":"","type":"price|deal|preorder|restock","url":"","whyFit":"","priceExcerpt":"","availabilityExcerpt":"","retailerExcerpt":""}],"ruledOut":[{"name":"","reason":""}],"note":""}. Each excerpt must be a short direct retailer-source excerpt. An item without all three excerpts must be ruled out. Final validated items are saved by the job.`,
     tools: [
       webSearchTool({ searchContextSize: 'medium' }),
       createOpenPage(job),
@@ -167,15 +167,21 @@ function createAgent(job) {
 }
 
 function recordHostedSearches(job, result) {
-  const responses = result.rawResponses || [];
-  for (const response of responses) {
-    for (const item of response.output || []) {
-      if (item.type === 'web_search_call') {
-        job.searches += 1;
-        job.toolCalls.push({ type: 'web_search', atMs: elapsed(job) });
-        console.log(JSON.stringify({ jobId: job.id, tool: 'web_search' }));
-      }
+  const calls = new Map();
+  const visit = (value) => {
+    if (!value || typeof value !== 'object') return;
+    if (value.type === 'web_search_call') {
+      const key = value.call_id || value.callId || value.id || JSON.stringify(value);
+      calls.set(key, value);
     }
+    for (const child of Array.isArray(value) ? value : Object.values(value)) visit(child);
+  };
+  visit(result.rawResponses || []);
+  visit(result.newItems || []);
+  for (const call of calls.values()) {
+    job.searches += 1;
+    job.toolCalls.push({ type: 'web_search', atMs: elapsed(job) });
+    console.log(JSON.stringify({ jobId: job.id, tool: 'web_search', id: call.id || call.call_id || call.callId }));
   }
 }
 
@@ -185,7 +191,7 @@ function validateResults(results) {
   }
   const seen = new Set();
   for (const item of results.items) {
-    const required = ['name', 'url', 'eligibilityExcerpt', 'availabilityExcerpt', 'locationExcerpt'];
+    const required = ['name', 'url', 'priceExcerpt', 'availabilityExcerpt', 'retailerExcerpt'];
     if (required.some((key) => !String(item?.[key] || '').trim())) {
       throw new Error('A shortlisted item was missing required evidence.');
     }
@@ -199,12 +205,8 @@ function validateResults(results) {
       throw new Error('Duplicate opportunities were returned.');
     }
     seen.add(canonicalName);
-    const evidence = `${item.eligibilityExcerpt} ${item.availabilityExcerpt} ${item.locationExcerpt}`.toLowerCase();
-    if (/identif(?:y|ies) as|women only|men only|students only|university students only|tertiary students only/.test(evidence)) {
-      throw new Error('An item depended on an unverified personal attribute.');
-    }
-    if (!/(auckland|tāmaki makaura|new zealand|online)/.test(String(item.locationExcerpt).toLowerCase())) {
-      throw new Error('An item lacked explicit Auckland, New Zealand, or online location evidence.');
+    if (!/(nzd|\$\s*\d|\d\s*nz\s*dollars?)/i.test(String(item.priceExcerpt))) {
+      throw new Error('An item lacked a NZD price excerpt.');
     }
   }
   if (results.items.length > 5) throw new Error('More than five opportunities were returned.');
@@ -223,8 +225,8 @@ async function runJob(job) {
       maxTurns: MAX_PAGE_READS + MAX_SEARCHES + 2,
     });
     recordHostedSearches(job, result);
-    if (job.searches === 0 && job.pageReads === 0) {
-      throw new Error('Search-first verification failed: no search or source-read call was recorded.');
+    if (job.searches < 3) {
+      throw new Error('Price research requires at least three distinct web searches.');
     }
     if (job.searches > MAX_SEARCHES || job.pageReads > MAX_PAGE_READS) {
       throw new Error('A tool-use limit was exceeded; no results were accepted.');
@@ -241,7 +243,7 @@ async function runJob(job) {
         await job.saveOpportunity({
           title: item.name,
           url: item.url,
-          sourceExcerpt: `Eligibility: ${item.eligibilityExcerpt}\nAvailability: ${item.availabilityExcerpt}\nLocation: ${item.locationExcerpt}`,
+          sourceExcerpt: `Price: ${item.priceExcerpt}\nAvailability: ${item.availabilityExcerpt}\nRetailer: ${item.retailerExcerpt}`,
           whyItFits: item.whyFit || 'Matches the stated interests.',
         });
       }

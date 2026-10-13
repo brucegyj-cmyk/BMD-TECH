@@ -1,4 +1,13 @@
+import { timingSafeEqual } from 'node:crypto';
+
 export const runtime = 'nodejs';
+
+function passwordsMatch(value, expected) {
+  if (typeof value !== 'string' || !expected) return false;
+  const supplied = Buffer.from(value);
+  const configured = Buffer.from(expected);
+  return supplied.length === configured.length && timingSafeEqual(supplied, configured);
+}
 
 function agentConfig() {
   const agentUrl = process.env.AGENT_URL;
@@ -9,8 +18,9 @@ function agentConfig() {
 
 function validJobId(jobId) { return /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(jobId); }
 
-async function relay(jobId, suffix, method) {
+async function relay(request, jobId, suffix, method) {
   if (!validJobId(jobId)) return Response.json({ error: 'Invalid job id.' }, { status: 400 });
+  if (!passwordsMatch(request.headers.get('x-site-password'), process.env.SITE_PASSWORD)) return Response.json({ error: 'Incorrect site password.' }, { status: 401 });
   try {
     const { agentUrl, agentSecret } = agentConfig();
     const response = await fetch(`${agentUrl}/jobs/${jobId}${suffix}`, { method, headers: method === 'POST' ? { AGENT_SECRET: agentSecret } : undefined, cache: 'no-store', signal: AbortSignal.timeout(12_000) });
@@ -22,5 +32,5 @@ async function relay(jobId, suffix, method) {
   }
 }
 
-export async function GET(_request, { params }) { const { jobId } = await params; return relay(jobId, '', 'GET'); }
-export async function POST(_request, { params }) { const { jobId } = await params; return relay(jobId, '/cancel', 'POST'); }
+export async function GET(request, { params }) { const { jobId } = await params; return relay(request, jobId, '', 'GET'); }
+export async function POST(request, { params }) { const { jobId } = await params; return relay(request, jobId, '/cancel', 'POST'); }

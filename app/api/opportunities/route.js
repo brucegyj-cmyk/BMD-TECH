@@ -1,6 +1,8 @@
 import { timingSafeEqual } from 'node:crypto';
+import { opportunitiesClient, safeOpportunity } from '../../../lib/opportunities';
 
 export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 function configuredAgent() {
   const agentUrl = process.env.AGENT_URL;
@@ -14,6 +16,20 @@ function passwordsMatch(value, expected) {
   const supplied = Buffer.from(value);
   const configured = Buffer.from(expected);
   return supplied.length === configured.length && timingSafeEqual(supplied, configured);
+}
+
+export async function GET() {
+  try {
+    const { data, error } = await opportunitiesClient()
+      .from('opportunities')
+      .select('id,title,url,source_excerpt,why_it_fits,status,found_at,decided_at')
+      .eq('status', 'approved')
+      .order('found_at', { ascending: false });
+    if (error) throw error;
+    return Response.json({ opportunities: data.map(safeOpportunity) });
+  } catch (error) {
+    return Response.json({ error: error.message || 'Could not load approved opportunities.' }, { status: 500 });
+  }
 }
 
 export async function POST(request) {
