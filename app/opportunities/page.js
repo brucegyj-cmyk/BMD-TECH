@@ -1,6 +1,15 @@
-'use client';
 import OpportunitiesClient from './opportunities-client';
-export default OpportunitiesClient;
+
+export default function OpportunitiesPage() {
+  return <>
+    <div className="notice">FREE SHIPPING ON ORDERS OVER <strong>$150</strong> &nbsp; | &nbsp; NZ-BASED SUPPORT</div>
+    <div className="utility"><div className="wrap">Business &amp; Education &nbsp; | &nbsp; Store Locator &nbsp; | &nbsp; Help Centre &nbsp; | &nbsp; Sign In</div></div>
+    <header className="head"><div className="wrap"><a className="brand" href="/">BMD <b>TECH</b></a><div className="head-title">GPU PRICE TRACKER <span>Verified NZ retail pricing and availability</span></div><div className="head-actions"><div>☎ 0800 BMD TECH<span>Mon–Fri, 9am–5pm</span></div></div></div></header>
+    <nav className="nav"><div className="wrap"><a href="/">☰ SHOP ALL</a><a href="/#memory">MEMORY</a><a href="/#graphics">GRAPHICS CARDS</a><a href="/#amd">AMD CPU</a><a href="/#deals">DEALS</a><a className="nav-active" href="/opportunities">GPU PRICES</a></div></nav>
+    <OpportunitiesClient />
+    <footer className="footer"><div className="wrap"><div><a className="brand" href="/">BMD <b>TECH</b></a><p>Hardware for people who make things happen.</p><p>© 2026 BMD TECH. All prices in NZD.</p></div><nav><a href="/">Components</a><a href="/opportunities">GPU Prices</a><a href="/#support">Support</a><a href="/#deals">Delivery &amp; Returns</a></nav></div></footer>
+  </>;
+}
 /*
 
 import { useEffect, useState } from 'react';
