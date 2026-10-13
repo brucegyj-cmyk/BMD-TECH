@@ -2,6 +2,7 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { Agent, run, tool, webSearchTool } from '@openai/agents';
+import { createClient } from '@supabase/supabase-js';
 import { z } from 'zod';
 
 const PORT = Number(process.env.PORT || 8080);
@@ -84,10 +85,80 @@ function createOpenPage(job) {
   });
 }
 
+function createUpdateSite(job) {
+  const save = async ({ title, url, sourceExcerpt, whyItFits }) => {
+    if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_KEY) {
+      throw new Error('SUPABASE_URL and SUPABASE_SERVICE_KEY must be configured to save opportunities.');
+    }
+    if (job.controller.signal.aborted) throw new Error('Job cancelled or timed out.');
+    try {
+      const parsedUrl = new URL(url);
+      if (!['http:', 'https:'].includes(parsedUrl.protocol)) throw new Error('Unsupported protocol');
+    } catch {
+      throw new Error('update_site requires an absolute HTTP(S) URL.');
+    }
+
+    const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY, {
+      auth: { autoRefreshToken: false, persistSession: false },
+    });
+    const { data: existing, error: lookupError } = await supabase
+      .from('opportunities')
+      .select('id')
+      .eq('url', url)
+      .maybeSingle();
+    if (lookupError) throw new Error(`Could not check existing opportunity: ${lookupError.message}`);
+
+    if (existing) {
+      const event = { type: 'update_site', url, outcome: 'skipped_existing', atMs: elapsed(job) };
+      job.toolCalls.push(event);
+      console.log(JSON.stringify({ jobId: job.id, tool: 'update_site', url, outcome: 'skipped_existing' }));
+      return { status: 'skipped_existing', url };
+    }
+
+    const { error: insertError } = await supabase.from('opportunities').insert({
+      title,
+      url,
+      source_excerpt: sourceExcerpt,
+      why_it_fits: whyItFits,
+      status: 'new',
+    });
+    if (insertError?.code === '23505') {
+      const event = { type: 'update_site', url, outcome: 'skipped_existing', atMs: elapsed(job) };
+      job.toolCalls.push(event);
+      console.log(JSON.stringify({ jobId: job.id, tool: 'update_site', url, outcome: 'skipped_existing' }));
+      return { status: 'skipped_existing', url };
+    }
+    if (insertError) throw new Error(`Could not save opportunity: ${insertError.message}`);
+
+    job.savedUrls.add(url);
+    const event = { type: 'update_site', url, outcome: 'saved', atMs: elapsed(job) };
+    job.toolCalls.push(event);
+    console.log(JSON.stringify({ jobId: job.id, tool: 'update_site', url, outcome: 'saved' }));
+    return { status: 'saved', url };
+  };
+
+  return {
+    save,
+    tool: tool({
+      name: 'update_site',
+      description: 'Save one fully verified opportunity to the site. Call exactly once for every item kept in the final results, and never for ruled-out or incompletely verified items. Existing URLs are skipped.',
+      parameters: z.object({
+        title: z.string().min(1),
+        url: z.string().min(1),
+        sourceExcerpt: z.string().min(1),
+        whyItFits: z.string().min(1),
+      }),
+      execute: save,
+    }),
+  };
+}
+
 function createAgent(job) {
+  const updateSite = createUpdateSite(job);
+  job.saveOpportunity = updateSite.save;
   return new Agent({
     name: 'Verified opportunity researcher',
-    instructions: `You find current opportunities for this person:\n${job.interests}\n\nUse web search first. You have at most ${MAX_SEARCHES} searches and ${MAX_PAGE_READS} page reads. For every shortlisted item, use open_page on an official organizer, event, or application source before accepting it. Verify all three: (1) a 25-year-old is eligible, (2) it is available in Auckland or explicitly online/open to New Zealand residents, and (3) applications, registration, or attendance are currently open. Do not assume education, school, work experience, citizenship, or travel ability. If a page fails, seek another source. Never invent results to fill a quota; return up to five and fewer when verification is incomplete.\n\nReturn JSON only with this shape: {"items":[{"name":"","type":"competition|program|event","url":"","whyFit":"","eligibilityExcerpt":"","availabilityExcerpt":"","locationExcerpt":""}],"ruledOut":[{"name":"","reason":""}],"note":""}. Each excerpt must be a short direct source excerpt. An item without all three excerpts must be ruled out.`,
+    instructions: `You find current opportunities for this person:\n${job.interests}\n\nUse web search first. You have at most ${MAX_SEARCHES} searches and ${MAX_PAGE_READS} page reads. For every shortlisted item, use open_page on an official organizer, event, or application source before accepting it. Verify all three: (1) a 25-year-old is eligible, (2) it is available in Auckland or explicitly online/open to New Zealand residents, and (3) applications, registration, or attendance are currently open. Do not assume education, school, work experience, citizenship, or travel ability. If a page fails, seek another source. Never invent results to fill a quota; return up to five and fewer when verification is incomplete.\n\nReturn JSON only with this shape: {"items":[{"name":"","type":"competition|program|event","url":"","whyFit":"","eligibilityExcerpt":"","availabilityExcerpt":"","locationExcerpt":""}],"ruledOut":[{"name":"","reason":""}],"note":""}. Each excerpt must be a short direct source excerpt. An item without all three excerpts must be ruled out. Final validated items are saved by the job.`,
     tools: [
       webSearchTool({ searchContextSize: 'medium' }),
       createOpenPage(job),
@@ -152,8 +223,8 @@ async function runJob(job) {
       maxTurns: MAX_PAGE_READS + MAX_SEARCHES + 2,
     });
     recordHostedSearches(job, result);
-    if (job.searches === 0) {
-      throw new Error('Search-first verification failed: no hosted web-search call was recorded.');
+    if (job.searches === 0 && job.pageReads === 0) {
+      throw new Error('Search-first verification failed: no search or source-read call was recorded.');
     }
     if (job.searches > MAX_SEARCHES || job.pageReads > MAX_PAGE_READS) {
       throw new Error('A tool-use limit was exceeded; no results were accepted.');
@@ -165,6 +236,16 @@ async function runJob(job) {
       throw new Error('The research agent did not return valid JSON.');
     }
     validateResults(job.results);
+    for (const item of job.results.items) {
+      if (!job.savedUrls.has(item.url)) {
+        await job.saveOpportunity({
+          title: item.name,
+          url: item.url,
+          sourceExcerpt: `Eligibility: ${item.eligibilityExcerpt}\nAvailability: ${item.availabilityExcerpt}\nLocation: ${item.locationExcerpt}`,
+          whyItFits: item.whyFit || 'Matches the stated interests.',
+        });
+      }
+    }
     job.status = 'completed';
   } catch (error) {
     job.status = job.controller.signal.aborted ? 'cancelled' : 'error';
@@ -188,7 +269,7 @@ async function handle(req, res) {
     const interests = readInterests(await readFile(new URL('./interests.txt', import.meta.url), 'utf8'));
     const job = {
       id: randomUUID(), status: 'running', startedAt: Date.now(), interests,
-      searches: 0, pageReads: 0, toolCalls: [], controller: new AbortController(),
+      searches: 0, pageReads: 0, toolCalls: [], savedUrls: new Set(), controller: new AbortController(),
     };
     jobs.set(job.id, job);
     void runJob(job);
