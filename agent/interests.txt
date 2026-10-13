@@ -1,6 +1,9 @@
 Age: 25
 City: Auckland NZ
 Interests:
+NVDIA 5060 TI 16GB retail price
 NVDIA 5070 retail price
+NVDIA 5070 TI RETAIL price
 NVDIA 5080 retail price
-AMD 9060 retail price
+AMD 9060XT 16GB retail price
+AMD 9070XT 16GB RETAIL price
